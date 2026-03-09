@@ -8,17 +8,17 @@ import py3Dmol
 import streamlit.components.v1 as components
 
 # --- ページ設定 ---
-st.set_page_config(page_title="XTB-CREST Web Console v8.9", layout="wide")
+st.set_page_config(page_title="XTB-CREST Web Console v9.1", layout="wide")
 
-# M4 Pro クラッシュ対策用の環境変数
+# M4 Pro クラッシュ対策（スタックメモリ拡張） [cite: 3]
 env = os.environ.copy()
 env["OMP_STACKSIZE"] = "2G"
 env["OMP_NUM_THREADS"] = "4"
 
-st.title("🧪 XTB-CREST Web Console v8.9")
-st.write("Full Integrated Suite for Natural Products Chemistry")
+st.title("🧪 XTB-CREST Web Console v9.1")
+st.write("Full Integrated Suite - Dual Search Engine Mode")
 
-# --- 座標抽出関数 (PDB/MOLを確実にXYZへ) ---
+# --- 座標抽出関数 (PDB/MOL/SDF) ---
 def parse_to_xyz(file_obj, ext):
     lines = file_obj.getvalue().decode().splitlines()
     atoms = []
@@ -39,17 +39,25 @@ def parse_to_xyz(file_obj, ext):
 
 # --- 状態リセット ---
 def reset_all():
-    for f in ["xtb.trj", "input.xyz", "crest_conformers.xyz", "xtbopt.xyz"]:
+    files = ["xtb.trj", "input.xyz", "crest_conformers.xyz", "xtbopt.xyz", "crestopt.log", "xtbopt.log", "xtb_confs.xyz"]
+    for f in files:
         if os.path.exists(f): os.remove(f)
     if "current_file" in st.session_state:
         del st.session_state.current_file
     st.rerun()
 
-# --- サイドバー：先生の全設定項目を復元 ---
+# --- サイドバー：設定 ---
 with st.sidebar:
     st.header("⚙️ Settings")
     comp_name = st.text_input("Compound Name", value="", placeholder="e.g. Stilbene_Oligomer")
-    calc_mode = st.radio("Method", ["CREST (Search)", "xTB (Opt)"])
+    
+    # v9.1: 手法の選択肢を3つに拡充
+    calc_mode = st.radio("Method", [
+        "CREST (Conformer Search)", 
+        "xTB (Simple Search)", 
+        "xTB (Optimization Only)"
+    ])
+    
     solvent = st.selectbox("Solvent", ["methanol", "water", "chcl3", "benzene", "none"])
     cores = st.slider("Cores", 1, 12, 4)
     
@@ -58,7 +66,7 @@ with st.sidebar:
     low_thresh = st.number_input("Threshold 1 (Low)", value=3.0, step=0.5)
     high_thresh = st.number_input("Threshold 2 (High)", value=10.0, step=1.0)
     
-    if st.button("🗑️ Full Application Reset"):
+    if st.button("🗑️ Full Reset"):
         reset_all()
 
 # --- メインパネル ---
@@ -74,35 +82,49 @@ with col1:
             if os.path.exists("xtb.trj"): os.remove("xtb.trj")
             st.session_state.current_file = uploaded_file.name
         
-        # 内部XYZ生成
         with open("input.xyz", "w") as f:
             f.write(parse_to_xyz(uploaded_file, ext))
 
         if st.button("🚀 Start Calculation", type="primary"):
             with st.status("Executing Analysis...", expanded=True) as status:
                 env["OMP_NUM_THREADS"] = str(cores)
-                # GFN-FFプリ最適化を標準装備
+                
+                # Step 1: 共通のプリ最適化
                 st.write("Step 1: GFN-FF Pre-opt...")
                 subprocess.run(["xtb", "input.xyz", "--gfnff", "--opt", "-T", str(cores)], env=env)
                 target = "xtbopt.xyz" if os.path.exists("xtbopt.xyz") else "input.xyz"
                 
+                # Step 2: 選択手法による計算
                 st.write(f"Step 2: Running {calc_mode}...")
+                
                 if "CREST" in calc_mode:
                     cmd = ["crest", target, "--gfn2", "-T", str(cores), "--quick"]
                     if solvent != "none": cmd.extend(["--alpb", solvent])
                     subprocess.run(cmd, env=env)
-                    if os.path.exists("crest_conformers.xyz"): os.replace("crest_conformers.xyz", "xtb.trj")
+                    if os.path.exists("crest_conformers.xyz"):
+                        os.replace("crest_conformers.xyz", "xtb.trj")
+                
+                elif "Simple Search" in calc_mode:
+                    # xTB自体の簡易探索機能
+                    cmd = ["xtb", target, "--conf", "--gfn2", "-T", str(cores)]
+                    if solvent != "none": cmd.extend(["--alpb", solvent])
+                    subprocess.run(cmd, env=env)
+                    if os.path.exists("xtb_confs.xyz"):
+                        os.replace("xtb_confs.xyz", "xtb.trj")
+                
                 else:
+                    # 通常の1構造最適化
                     cmd = ["xtb", target, "--opt", "--gfn2", "-T", str(cores)]
                     if solvent != "none": cmd.extend(["--alpb", solvent])
                     subprocess.run(cmd, env=env)
-                    if os.path.exists("xtbopt.xyz"): os.replace("xtbopt.xyz", "xtb.trj")
+                    if os.path.exists("xtbopt.xyz"):
+                        os.replace("xtbopt.xyz", "xtb.trj")
                 
                 if os.path.exists("xtb.trj"):
                     status.update(label="Success!", state="complete")
                     st.rerun()
 
-    # --- 解析とSDF生成：先生のロジックを完全復元 ---
+    # --- 解析とSDF生成ロジック ---
     frames = []
     num_atoms, min_e = 0, 0.0
     if os.path.exists("xtb.trj"):
@@ -140,7 +162,12 @@ with col1:
 with col2:
     st.subheader("🔍 3D Viewer")
     if frames:
-        rank = st.slider("Select Structure", 1, len(frames), 1)
+        if len(frames) > 1:
+            rank = st.slider("Select Structure", 1, len(frames), 1)
+        else:
+            st.info("Single structure optimized.")
+            rank = 1
+            
         f_view = frames[rank-1]
         xyz_data = "".join(f_view["coords"])
         view = py3Dmol.view(width=450, height=450)
@@ -149,3 +176,5 @@ with col2:
         view.zoomTo()
         components.html(view._make_html(), height=460)
         st.write(f"Relative Energy: **{(f_view['energy'] - min_e) * 627.509:.4f} kcal/mol**")
+    else:
+        st.info("Waiting for calculation results...")
