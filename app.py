@@ -6,40 +6,48 @@ import numpy as np
 import py3Dmol
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="XTB Web Console v9.7", layout="wide")
+# --- Page Configuration ---
+st.set_page_config(page_title="XTB Web Console", layout="wide")
 
-# --- 物理定数・変換 ---
+# M4 Pro Environment Settings
+env = os.environ.copy()
+env["OMP_STACKSIZE"] = "2G"
+
+# --- Constants ---
 AU_TO_KCAL = 627.509
 
 def reset_all():
+    exts = (".xyz", ".trj", ".pdb", ".mol", ".log", ".inp", ".out", ".sdf", "xtbrestart", "wbo")
     for f in os.listdir("."):
-        if f.endswith((".xyz", ".trj", ".pdb", ".mol", ".log", ".inp", ".out", ".sdf")):
+        if f.endswith(exts) or "xtb" in f:
             try: os.remove(f)
             except: pass
     st.session_state.clear()
     st.rerun()
 
-# --- サイドバー ---
+# --- Title ---
+st.title("🧪 XTB Web Console v9.8")
+
+# --- Sidebar (Settings) ---
 with st.sidebar:
-    st.header("⚙️ Settings")
+    st.header("Settings")
     comp_name = st.text_input("Compound Name", value="structure")
     calc_mode = st.radio("Method", ["xTB Opt", "xTB MD"])
-    cores = st.slider("CPU Cores", 1, 12, 10)
+    cores = st.slider("CPU Cores", 1, 12, 11)
     
     st.divider()
-    st.header("🎯 Filtering & Export")
-    # 先生のリクエスト：0-10 kcal/mol の選別
+    st.header("Filter & Export")
     e_window = st.slider("Energy Window (kcal/mol)", 0.0, 10.0, 3.0)
-    rmsd_thr = st.slider("RMSD Clustering Threshold (Å)", 0.0, 2.0, 0.5)
+    rmsd_thr = st.slider("RMSD Threshold (Å)", 0.0, 2.0, 0.5)
     
-    if st.button("🗑️ Full Reset"):
+    if st.button("Full Reset"):
         reset_all()
 
 col1, col2 = st.columns([1, 1])
 
 with col1:
-    st.subheader("📥 Input Control")
-    uploaded_file = st.file_uploader("Upload Structure", type=["pdb", "mol", "xyz"])
+    st.subheader("Input & Control")
+    uploaded_file = st.file_uploader("Upload Structure (PDB/MOL/XYZ)", type=["pdb", "mol", "xyz"])
     
     if uploaded_file and comp_name:
         in_ext = uploaded_file.name.split('.')[-1].lower()
@@ -47,9 +55,9 @@ with col1:
         with open(input_file, "wb") as f:
             f.write(uploaded_file.getbuffer())
         
-        if st.button("🚀 Start Calculation", type="primary"):
+        if st.button("Start Calculation", type="primary"):
             with st.status("Calculating...", expanded=True) as status:
-                # 実行前処理
+                # Clean up old files
                 for f in ["xtbopt.xyz", "xtbopt.mol", "xtb.trj"]:
                     if os.path.exists(f): os.remove(f)
 
@@ -62,9 +70,9 @@ with col1:
                     cmd = ["xtb", input_file, "--md", "--input", "md.inp", "--gfn", "2", "-P", str(cores)]
                     check_targets = ["xtb.trj"]
                 
-                result = subprocess.run(cmd, capture_output=True, text=True)
+                result = subprocess.run(cmd, env=env, capture_output=True, text=True)
                 
-                # ファイル検出
+                # File Detection
                 found = False
                 for i in range(15):
                     for t in check_targets:
@@ -73,76 +81,84 @@ with col1:
                             final_name = f"{comp_name}_raw.trj" if "MD" in calc_mode else f"{comp_name}_opt.{in_ext}"
                             os.replace(t, final_name)
                             st.session_state.current_raw = final_name
+                            st.session_state.output_ext = t.split('.')[-1]
                             found = True; break
                     if found: break
                     time.sleep(1)
                 
                 if found:
-                    status.update(label="Calculation Successful!", state="complete")
+                    status.update(label="Success!", state="complete")
                     st.rerun()
+                else:
+                    st.error("Output Not Found")
+                    st.code(result.stdout[-1000:])
 
-    # --- 配座選別 & SDF変換ロジック ---
+    # --- Processing & SDF Export ---
     if "current_raw" in st.session_state and st.session_state.current_raw.endswith(".trj"):
         st.divider()
-        st.subheader("📦 Conformer Processing")
-        if st.button("Generate Clean SDF (Filter & Cluster)"):
-            with st.spinner("Processing trajectory..."):
-                # 1. Trajectory読み込み & エネルギー抽出
+        st.subheader("Conformer Processing")
+        if st.button("Generate SDF (Filter & Cluster)"):
+            with st.spinner("Processing..."):
                 with open(st.session_state.current_raw, "r") as f:
                     lines = f.readlines()
                 
                 num_atoms = int(lines[0].strip())
-                frame_size = num_atoms + 2
-                frames = [lines[i:i+frame_size] for i in range(0, len(lines), frame_size)]
+                f_size = num_atoms + 2
+                frames = [lines[i:i+f_size] for i in range(0, len(lines), f_size)]
                 
                 data = []
-                for frame in frames:
-                    e_match = [l for l in frame if "energy:" in l]
-                    if e_match:
-                        e_val = float(e_match[0].split()[2])
-                        coords = np.array([[float(x) for x in l.split()[1:4]] for l in frame[2:2+num_atoms]])
-                        data.append({"energy": e_val, "coords": coords, "frame": frame})
+                for f in frames:
+                    e_m = [l for l in f if "energy:" in l]
+                    if e_m:
+                        e_val = float(e_m[0].split()[2])
+                        c = np.array([[float(x) for x in l.split()[1:4]] for l in f[2:2+num_atoms]])
+                        data.append({"energy": e_val, "coords": c, "frame": f})
                 
-                # 2. エネルギー選別
                 min_e = min(d["energy"] for d in data)
-                valid_data = [d for d in data if (d["energy"] - min_e) * AU_TO_KCAL <= e_window]
-                valid_data.sort(key=lambda x: x["energy"]) # エネルギー順
+                valid = [d for d in data if (d["energy"] - min_e) * AU_TO_KCAL <= e_window]
+                valid.sort(key=lambda x: x["energy"])
                 
-                # 3. RMSDクラスタリング (簡易実装)
-                final_conformers = []
-                if valid_data:
-                    final_conformers.append(valid_data[0])
-                    for d in valid_data[1:]:
-                        is_unique = True
-                        for ref in final_conformers:
+                final = []
+                if valid:
+                    final.append(valid[0])
+                    for d in valid[1:]:
+                        unique = True
+                        for ref in final:
                             diff = d["coords"] - ref["coords"]
-                            rmsd = np.sqrt(np.mean(np.sum(diff**2, axis=1)))
-                            if rmsd < rmsd_thr:
-                                is_unique = False; break
-                        if is_unique:
-                            final_conformers.append(d)
+                            if np.sqrt(np.mean(np.sum(diff**2, axis=1))) < rmsd_thr:
+                                unique = False; break
+                        if unique: final.append(d)
                 
-                # 4. SDF書き出し (簡易変換)
                 sdf_name = f"{comp_name}_conformers.sdf"
                 with open(sdf_name, "w") as f:
-                    for i, d in enumerate(final_conformers):
+                    for i, d in enumerate(final):
                         rel_e = (d["energy"] - min_e) * AU_TO_KCAL
-                        f.write(f"{comp_name}_conf_{i}\n")
-                        f.write(f" xTB-MD / RelE: {rel_e:.3f} kcal/mol\n\n")
-                        f.write(f"{num_atoms:>3}{0:>3}  0  0  0  0  0  0  0  0999 V2000\n")
-                        for j, l in enumerate(d["frame"][2:2+num_atoms]):
-                            parts = l.split()
-                            f.write(f"{float(parts[1]):>10.4f}{float(parts[2]):>10.4f}{float(parts[3]):>10.4f} {parts[0]:<3} 0  0  0  0  0  0  0  0  0  0  0  0\n")
+                        f.write(f"{comp_name}_conf_{i}\n xTB-MD / RelE: {rel_e:.3f} kcal/mol\n\n")
+                        f.write(f"{num_atoms:>3}  0  0  0  0  0  0  0  0  0999 V2000\n")
+                        for l in d["frame"][2:2+num_atoms]:
+                            p = l.split()
+                            f.write(f"{float(p[1]):>10.4f}{float(p[2]):>10.4f}{float(p[3]):>10.4f} {p[0]:<3} 0  0  0  0  0  0  0  0  0  0  0  0\n")
                         f.write("M  END\n$$$$\n")
                 
                 st.session_state.current_sdf = sdf_name
-                st.success(f"Extracted {len(final_conformers)} unique conformers within {e_window} kcal/mol.")
+                st.success(f"Extracted {len(final)} conformers.")
 
-    # --- ダウンロードボタン ---
     if "current_sdf" in st.session_state:
-        with open(st.session_state.current_sdf, "r") as f:
-            st.download_button(f"💾 Download {st.session_state.current_sdf}", data=f.read(), file_name=st.session_state.current_sdf)
+        st.download_button(f"Download SDF", data=open(st.session_state.current_sdf, "rb"), file_name=st.session_state.current_sdf)
 
 with col2:
-    st.subheader("🔍 3D Viewer")
-    # (Viewer部分は前述のTrajectory再生モードを維持)
+    st.subheader("3D Viewer")
+    if "current_raw" in st.session_state:
+        with open(st.session_state.current_raw, "r") as f:
+            data = f.read()
+            if data:
+                fmt = st.session_state.get("output_ext", "xyz")
+                view = py3Dmol.view(width=500, height=500)
+                if ".trj" in st.session_state.current_raw:
+                    view.addModelsAsFrames(data, 'xyz')
+                    view.animate({'loop': 'backward', 'step': 5})
+                else:
+                    view.addModel(data, fmt)
+                view.setStyle({'stick': {'radius': 0.15}, 'sphere': {'scale': 0.25}})
+                view.zoomTo()
+                components.html(view._make_html(), height=510)
