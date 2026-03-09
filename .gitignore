@@ -1,0 +1,12 @@
+*.xyz
+*.trj
+*.mol
+*.pdb
+*.log
+*.inp
+*.out
+*.sdf
+xtbrestart
+wbo
+__pycache__/
+.DS_Store
