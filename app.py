@@ -8,17 +8,24 @@ import py3Dmol
 import streamlit.components.v1 as components
 
 # --- ページ設定 ---
-st.set_page_config(page_title="XTB-CREST Web Console v7.6", layout="wide")
+st.set_page_config(page_title="XTB-CREST Web Console v7.7", layout="wide")
 
-st.title("🧪 XTB-CREST Web Console v7.6")
+st.title("🧪 XTB-CREST Web Console v7.7")
 st.write("Natural Products Conformer Ensemble Analyzer")
 
-# --- サイドバー：設定（常に表示） ---
+# --- 状態リセット用関数 ---
+def reset_all():
+    if os.path.exists("xtb.trj"):
+        os.remove("xtb.trj")
+    if "current_file" in st.session_state:
+        del st.session_state.current_file
+    st.rerun()
+
+# --- サイドバー：設定 ---
 with st.sidebar:
     st.header("⚙️ Settings")
     comp_name = st.text_input("Compound Name", value="", placeholder="Enter name to unlock downloads")
     
-    # 計算設定の復活
     calc_mode = st.radio("Calculation Method", ["CREST (Conformer Search)", "xTB (Optimization Only)"])
     solvent = st.selectbox("Solvent (ALPB)", ["methanol", "water", "chcl3", "benzene", "none"])
     cores = st.slider("CPU Cores", 1, 12, 4)
@@ -27,6 +34,10 @@ with st.sidebar:
     st.header("⚖️ Energy Thresholds (kcal/mol)")
     low_thresh = st.number_input("Threshold 1 (Low)", value=3.0, step=0.5)
     high_thresh = st.number_input("Threshold 2 (High)", value=10.0, step=1.0)
+    
+    st.divider()
+    if st.button("🗑️ Clear All & Reset"):
+        reset_all()
 
 # --- メインパネル ---
 col1, col2 = st.columns([1, 1])
@@ -35,7 +46,7 @@ with col1:
     st.subheader("📥 Export Results")
     uploaded_file = st.file_uploader("Upload XYZ File", type=["xyz"])
     
-    # 【最重要】新しいファイルが来たら古い結果ファイルを物理削除
+    # 新しいファイルが来たら古い結果を削除
     if uploaded_file:
         if "current_file" not in st.session_state or st.session_state.current_file != uploaded_file.name:
             if os.path.exists("xtb.trj"):
@@ -46,14 +57,20 @@ with col1:
     trj_exists = os.path.exists(trj_file)
     is_ready = True if (trj_exists and comp_name) else False
 
-    # 解析実行エリア
-    if uploaded_file and not trj_exists:
-        st.info("File uploaded. Choose analysis mode below:")
+    # --- 解析実行エリア（常に表示） ---
+    if uploaded_file:
+        st.write("---")
+        st.markdown("### 🚀 Calculation Control")
         b_col1, b_col2 = st.columns(2)
         
         with b_col1:
-            if st.button("🚀 Run Real CREST/xTB"):
+            # trjがあっても「再計算」できるように常に表示
+            btn_label = "🔄 Re-run Real Analysis" if trj_exists else "🚀 Run Real CREST/xTB"
+            if st.button(btn_label, type="primary"):
                 with st.spinner("Calculating..."):
+                    # 古いファイルを一旦消す
+                    if os.path.exists("xtb.trj"): os.remove("xtb.trj")
+                    
                     with open("input.xyz", "wb") as f:
                         f.write(uploaded_file.getbuffer())
                     
@@ -76,8 +93,9 @@ with col1:
                 with open("xtb.trj", "wb") as f:
                     f.write(uploaded_file.getbuffer())
                 st.rerun()
+        st.write("---")
 
-    # 解析データの読み込み
+    # データ読み込み・SDF生成ロジック（以下、前回と同じ）
     frames = []
     num_atoms = 0
     min_e = 0.0
@@ -95,7 +113,6 @@ with col1:
             frames.sort(key=lambda x: x["energy"])
             if frames: min_e = frames[0]["energy"]
 
-    # ダウンロードボタン表示
     def make_sdf(threshold):
         if not is_ready: return ""
         sdf = ""
@@ -120,11 +137,10 @@ with col1:
 with col2:
     st.subheader("🔍 3D Viewer")
     if is_ready and frames:
-        # スライダーエラーの完全回避
         if len(frames) > 1:
             rank = st.slider("Select Conformer", 1, len(frames), 1)
         else:
-            st.info("Single Conformer Result")
+            st.info("Single Result Displayed")
             rank = 1
         
         f_view = frames[rank-1]
@@ -136,5 +152,4 @@ with col2:
         components.html(view._make_html(), height=460)
         st.write(f"Relative Energy: **{(f_view['energy'] - min_e) * 627.509:.4f} kcal/mol**")
     else:
-        # プレースホルダー表示
         st.markdown('<div style="width:450px; height:450px; background-color:#262730; border-radius:10px; display:flex; align-items:center; justify-content:center; color:#555; border: 1px dashed #444;">Viewer Locked</div>', unsafe_allow_html=True)
