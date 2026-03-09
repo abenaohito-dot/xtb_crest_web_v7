@@ -8,14 +8,14 @@ import py3Dmol
 import streamlit.components.v1 as components
 
 # --- ページ設定 ---
-st.set_page_config(page_title="XTB-CREST Web Console v8.3", layout="wide")
+st.set_page_config(page_title="XTB-CREST Web Console v8.4", layout="wide")
 
-st.title("🧪 XTB-CREST Web Console v8.3")
+st.title("🧪 XTB-CREST Web Console v8.4")
 st.write("Natural Products Conformer Ensemble Analyzer - Professional Edition")
 
 # --- 状態リセット関数 ---
 def reset_all():
-    files_to_remove = ["xtb.trj", "input.xyz", "crest_conformers.xyz", "crestopt.log", "xtbopt.xyz", "xtbopt.log", "raw_input.*"]
+    files_to_remove = ["xtb.trj", "input.xyz", "crest_conformers.xyz", "crestopt.log", "xtbopt.xyz", "xtbopt.log", "raw_input.*", "xtbrestart"]
     for f in files_to_remove:
         if os.path.exists(f): 
             try: os.remove(f)
@@ -24,12 +24,13 @@ def reset_all():
         del st.session_state.current_file
     st.rerun()
 
-# --- サイドバー：設定（v8.0の全機能を維持） ---
+# --- サイドバー：設定（阿部先生の仕様を完全維持） ---
 with st.sidebar:
     st.header("⚙️ Settings")
     comp_name = st.text_input("Compound Name", value="", placeholder="Enter name to unlock downloads")
     
-    calc_mode = st.radio("Calculation Method", ["CREST (Full Search)", "xTB (Optimization)"])
+    # 手法選択（ここがxTB最適化とCREST探索の切り替えです）
+    calc_mode = st.radio("Calculation Method", ["CREST (Conformer Search)", "xTB (Optimization Only)"])
     solvent = st.selectbox("Solvent (ALPB)", ["methanol", "water", "chcl3", "benzene", "none"])
     cores = st.slider("CPU Cores", 1, 12, 4)
     
@@ -47,7 +48,6 @@ col1, col2 = st.columns([1, 1])
 
 with col1:
     st.subheader("📥 Export Results")
-    # v8.3: 対応形式を拡大 (MOL, PDBに対応)
     uploaded_file = st.file_uploader("Upload Structure File", type=["xyz", "mol", "pdb", "sdf"])
     
     if uploaded_file:
@@ -61,11 +61,14 @@ with col1:
         with open(temp_raw, "wb") as f:
             f.write(uploaded_file.getbuffer())
         
-        # XYZへの変換・洗浄
+        # v8.4: 各種形式からinput.xyzを生成
         if file_ext != "xyz":
-            subprocess.run(["xtb", temp_raw, "--steps", "0"], capture_output=True)
+            # 構造を壊さず変換するために--steps 0を利用
+            subprocess.run(["xtb", temp_raw, "--steps", "0", "--gfn2"], capture_output=True)
             if os.path.exists("xtbopt.xyz"):
                 os.replace("xtbopt.xyz", "input.xyz")
+            elif os.path.exists("xtb_crd.xyz"): # フォールバック
+                os.replace("xtb_crd.xyz", "input.xyz")
         else:
             os.replace(temp_raw, "input.xyz")
 
@@ -73,24 +76,27 @@ with col1:
     trj_exists = os.path.exists(trj_file)
     is_ready = True if (trj_exists and comp_name) else False
 
-    # --- 解析実行エリア（v8.0のUIを復元） ---
+    # --- 解析実行エリア ---
     if uploaded_file and os.path.exists("input.xyz"):
         st.write("---")
-        st.markdown("### 🚀 Calculation Control")
-        pre_opt = st.checkbox("Pre-optimize with GFN-FF", value=True)
-        quick_mode = st.checkbox("Quick Mode (--quick)", value=True)
+        st.markdown(f"### 🚀 Run {calc_mode}")
+        pre_opt = st.checkbox("Pre-optimize with GFN-FF (Recommended for large molecules)", value=True)
+        quick_mode = st.checkbox("Quick Mode (--quick for CREST)", value=True)
         
         b_col1, b_col2 = st.columns(2)
         with b_col1:
-            btn_label = "🔄 Re-run Analysis" if trj_exists else "🚀 Run Analysis"
+            btn_label = "🔄 Re-run Calculation" if trj_exists else "🚀 Run Analysis"
             if st.button(btn_label, type="primary"):
                 with st.spinner("Calculating..."):
                     target = "input.xyz"
+                    
+                    # Step 1: GFN-FFによるひずみ解消
                     if pre_opt:
                         subprocess.run(["xtb", "input.xyz", "--gfnff", "--opt", "-T", str(cores)])
                         if os.path.exists("xtbopt.xyz"): target = "xtbopt.xyz"
                     
-                    if calc_mode == "CREST (Full Search)":
+                    # Step 2: 選択された手法で実行
+                    if "CREST" in calc_mode:
                         cmd = ["crest", target, "--gfn2", "-T", str(cores)]
                         if quick_mode: cmd.append("--quick")
                         if solvent != "none": cmd.extend(["--alpb", solvent])
@@ -98,20 +104,26 @@ with col1:
                         if os.path.exists("crest_conformers.xyz"):
                             os.replace("crest_conformers.xyz", "xtb.trj")
                     else:
+                        # xTB (Optimization Only) のロジックを確実に実行
                         cmd = ["xtb", target, "--opt", "--gfn2", "-T", str(cores)]
                         if solvent != "none": cmd.extend(["--alpb", solvent])
                         subprocess.run(cmd)
                         if os.path.exists("xtbopt.xyz"):
                             os.replace("xtbopt.xyz", "xtb.trj")
-                    st.rerun()
+                    
+                    if not os.path.exists("xtb.trj"):
+                        st.error("Calculation failed. Please check the structure or terminal logs.")
+                    else:
+                        st.success("Analysis Complete!")
+                        st.rerun()
 
         with b_col2:
-            if st.button("🛠️ Launch Test (Dummy)"):
+            if st.button("🛠️ Launch Test (Dummy Result)"):
                 with open("xtb.trj", "wb") as f:
                     f.write(open("input.xyz", "rb").read())
                 st.rerun()
 
-    # --- データ解析とSDF生成（v8.0のロジックを復元） ---
+    # --- データ解析とSDF生成ロジック ---
     frames = []
     num_atoms, min_e = 0, 0.0
     if trj_exists:
@@ -153,7 +165,7 @@ with col1:
 with col2:
     st.subheader("🔍 3D Viewer")
     if is_ready and frames:
-        rank = st.slider("Select Conformer", 1, len(frames), 1) if len(frames) > 1 else 1
+        rank = st.slider("Select Structure", 1, len(frames), 1) if len(frames) > 1 else 1
         f_view = frames[rank-1]
         xyz_data = "".join(f_view["coords"])
         view = py3Dmol.view(width=450, height=450)
@@ -163,4 +175,4 @@ with col2:
         components.html(view._make_html(), height=460)
         st.write(f"Relative Energy: **{(f_view['energy'] - min_e) * 627.509:.4f} kcal/mol**")
     else:
-        st.info("Upload XYZ/MOL/PDB and run analysis.")
+        st.info("Upload structure and run analysis to view results.")
