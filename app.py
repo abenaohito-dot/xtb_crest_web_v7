@@ -8,171 +8,116 @@ import py3Dmol
 import streamlit.components.v1 as components
 
 # --- ページ設定 ---
-st.set_page_config(page_title="XTB-CREST Web Console v8.4", layout="wide")
+st.set_page_config(page_title="XTB-CREST Web Console v8.5", layout="wide")
 
-st.title("🧪 XTB-CREST Web Console v8.4")
-st.write("Natural Products Conformer Ensemble Analyzer - Professional Edition")
+st.title("🧪 XTB-CREST Web Console v8.5")
+st.write("Robust Reliability Mode")
 
 # --- 状態リセット関数 ---
 def reset_all():
-    files_to_remove = ["xtb.trj", "input.xyz", "crest_conformers.xyz", "crestopt.log", "xtbopt.xyz", "xtbopt.log", "raw_input.*", "xtbrestart"]
-    for f in files_to_remove:
-        if os.path.exists(f): 
+    files = ["xtb.trj", "input.xyz", "crest_conformers.xyz", "xtbopt.xyz", "crestopt.log", "raw_input.*"]
+    for f in files:
+        if os.path.exists(f):
             try: os.remove(f)
             except: pass
-    if "current_file" in st.session_state:
-        del st.session_state.current_file
     st.rerun()
 
-# --- サイドバー：設定（阿部先生の仕様を完全維持） ---
+# --- サイドバー ---
 with st.sidebar:
     st.header("⚙️ Settings")
-    comp_name = st.text_input("Compound Name", value="", placeholder="Enter name to unlock downloads")
-    
-    # 手法選択（ここがxTB最適化とCREST探索の切り替えです）
-    calc_mode = st.radio("Calculation Method", ["CREST (Conformer Search)", "xTB (Optimization Only)"])
-    solvent = st.selectbox("Solvent (ALPB)", ["methanol", "water", "chcl3", "benzene", "none"])
+    comp_name = st.text_input("Compound Name", value="", placeholder="Required for download")
+    calc_mode = st.radio("Method", ["CREST (Conformer Search)", "xTB (Optimization)"])
+    solvent = st.selectbox("Solvent", ["methanol", "water", "chcl3", "benzene", "none"])
     cores = st.slider("CPU Cores", 1, 12, 4)
     
     st.divider()
-    st.header("⚖️ Energy Thresholds (kcal/mol)")
-    low_thresh = st.number_input("Threshold 1 (Low)", value=3.0, step=0.5)
-    high_thresh = st.number_input("Threshold 2 (High)", value=10.0, step=1.0)
+    st.header("⚖️ Thresholds (kcal/mol)")
+    low_thresh = st.number_input("Threshold 1", value=3.0, step=0.5)
+    high_thresh = st.number_input("Threshold 2", value=10.0, step=1.0)
     
-    st.divider()
-    if st.button("🗑️ Clear All & Reset"):
+    if st.button("🗑️ Reset Application"):
         reset_all()
 
 # --- メインパネル ---
 col1, col2 = st.columns([1, 1])
 
 with col1:
-    st.subheader("📥 Export Results")
-    uploaded_file = st.file_uploader("Upload Structure File", type=["xyz", "mol", "pdb", "sdf"])
+    st.subheader("📥 Input & Control")
+    uploaded_file = st.file_uploader("Upload File (XYZ/MOL/PDB)", type=["xyz", "mol", "pdb", "sdf"])
     
     if uploaded_file:
-        file_ext = uploaded_file.name.split('.')[-1].lower()
-        if "current_file" not in st.session_state or st.session_state.current_file != uploaded_file.name:
-            if os.path.exists("xtb.trj"): os.remove("xtb.trj")
-            st.session_state.current_file = uploaded_file.name
-
-        # 一時保存とフォーマット変換
-        temp_raw = f"raw_input.{file_ext}"
-        with open(temp_raw, "wb") as f:
+        # ファイル保存とXYZ変換
+        ext = uploaded_file.name.split('.')[-1].lower()
+        with open(f"raw_input.{ext}", "wb") as f:
             f.write(uploaded_file.getbuffer())
         
-        # v8.4: 各種形式からinput.xyzを生成
-        if file_ext != "xyz":
-            # 構造を壊さず変換するために--steps 0を利用
-            subprocess.run(["xtb", temp_raw, "--steps", "0", "--gfn2"], capture_output=True)
-            if os.path.exists("xtbopt.xyz"):
-                os.replace("xtbopt.xyz", "input.xyz")
-            elif os.path.exists("xtb_crd.xyz"): # フォールバック
-                os.replace("xtb_crd.xyz", "input.xyz")
+        # フォーマット変換
+        if ext != "xyz":
+            subprocess.run(["xtb", f"raw_input.{ext}", "--steps", "0"], capture_output=True)
+            if os.path.exists("xtbopt.xyz"): os.replace("xtbopt.xyz", "input.xyz")
         else:
-            os.replace(temp_raw, "input.xyz")
+            os.replace(f"raw_input.{ext}", "input.xyz")
 
-    trj_file = "xtb.trj"
-    trj_exists = os.path.exists(trj_file)
+        # 実行ボタン
+        if st.button("🚀 Start Calculation", type="primary"):
+            # 以前の結果を削除
+            if os.path.exists("xtb.trj"): os.remove("xtb.trj")
+            
+            with st.status("Executing calculation...", expanded=True) as status:
+                st.write("Step 1: GFN-FF Pre-optimization...")
+                subprocess.run(["xtb", "input.xyz", "--gfnff", "--opt", "-T", str(cores)])
+                
+                target = "xtbopt.xyz" if os.path.exists("xtbopt.xyz") else "input.xyz"
+                
+                st.write(f"Step 2: Running {calc_mode}...")
+                if "CREST" in calc_mode:
+                    cmd = ["crest", target, "--gfn2", "-T", str(cores), "--quick"]
+                    if solvent != "none": cmd.extend(["--alpb", solvent])
+                    res = subprocess.run(cmd, capture_output=True, text=True)
+                    if os.path.exists("crest_conformers.xyz"):
+                        os.replace("crest_conformers.xyz", "xtb.trj")
+                else:
+                    cmd = ["xtb", target, "--opt", "--gfn2", "-T", str(cores)]
+                    if solvent != "none": cmd.extend(["--alpb", solvent])
+                    res = subprocess.run(cmd, capture_output=True, text=True)
+                    if os.path.exists("xtbopt.xyz"):
+                        os.replace("xtbopt.xyz", "xtb.trj")
+                
+                if os.path.exists("xtb.trj"):
+                    status.update(label="Calculation Finished!", state="complete")
+                    st.rerun()
+                else:
+                    status.update(label="Calculation Failed", state="error")
+                    st.error("Error Log:")
+                    st.code(res.stderr)
+
+    # SDF出力
+    trj_exists = os.path.exists("xtb.trj")
     is_ready = True if (trj_exists and comp_name) else False
-
-    # --- 解析実行エリア ---
-    if uploaded_file and os.path.exists("input.xyz"):
-        st.write("---")
-        st.markdown(f"### 🚀 Run {calc_mode}")
-        pre_opt = st.checkbox("Pre-optimize with GFN-FF (Recommended for large molecules)", value=True)
-        quick_mode = st.checkbox("Quick Mode (--quick for CREST)", value=True)
-        
-        b_col1, b_col2 = st.columns(2)
-        with b_col1:
-            btn_label = "🔄 Re-run Calculation" if trj_exists else "🚀 Run Analysis"
-            if st.button(btn_label, type="primary"):
-                with st.spinner("Calculating..."):
-                    target = "input.xyz"
-                    
-                    # Step 1: GFN-FFによるひずみ解消
-                    if pre_opt:
-                        subprocess.run(["xtb", "input.xyz", "--gfnff", "--opt", "-T", str(cores)])
-                        if os.path.exists("xtbopt.xyz"): target = "xtbopt.xyz"
-                    
-                    # Step 2: 選択された手法で実行
-                    if "CREST" in calc_mode:
-                        cmd = ["crest", target, "--gfn2", "-T", str(cores)]
-                        if quick_mode: cmd.append("--quick")
-                        if solvent != "none": cmd.extend(["--alpb", solvent])
-                        subprocess.run(cmd)
-                        if os.path.exists("crest_conformers.xyz"):
-                            os.replace("crest_conformers.xyz", "xtb.trj")
-                    else:
-                        # xTB (Optimization Only) のロジックを確実に実行
-                        cmd = ["xtb", target, "--opt", "--gfn2", "-T", str(cores)]
-                        if solvent != "none": cmd.extend(["--alpb", solvent])
-                        subprocess.run(cmd)
-                        if os.path.exists("xtbopt.xyz"):
-                            os.replace("xtbopt.xyz", "xtb.trj")
-                    
-                    if not os.path.exists("xtb.trj"):
-                        st.error("Calculation failed. Please check the structure or terminal logs.")
-                    else:
-                        st.success("Analysis Complete!")
-                        st.rerun()
-
-        with b_col2:
-            if st.button("🛠️ Launch Test (Dummy Result)"):
-                with open("xtb.trj", "wb") as f:
-                    f.write(open("input.xyz", "rb").read())
-                st.rerun()
-
-    # --- データ解析とSDF生成ロジック ---
+    
+    # 簡易的なデータパース
     frames = []
-    num_atoms, min_e = 0, 0.0
     if trj_exists:
         try:
-            with open(trj_file, 'r') as f:
+            with open("xtb.trj", 'r') as f:
                 lines = f.readlines()
             if lines:
                 num_atoms = int(lines[0].strip())
-                chunk_size = num_atoms + 2
-                for i in range(0, len(lines), chunk_size):
-                    chunk = lines[i:i+chunk_size]
-                    if len(chunk) < chunk_size: break
-                    e_match = re.search(r"energy:\s+([-+]?\d+\.\d+)", chunk[1])
-                    frames.append({"energy": float(e_match.group(1)) if e_match else 0.0, "coords": chunk})
-                frames.sort(key=lambda x: x["energy"])
-                if frames: min_e = frames[0]["energy"]
+                for i in range(0, len(lines), num_atoms + 2):
+                    frames.append(lines[i:i + num_atoms + 2])
         except: pass
 
-    def get_sdf(threshold):
-        if not is_ready: return ""
-        sdf = ""
-        for i, f in enumerate(frames, start=1):
-            rel_e = (f["energy"] - min_e) * 627.509
-            if rel_e > threshold: break
-            sdf += f"{comp_name}_{i}\nThreshold: {threshold} kcal\n\n"
-            sdf += f"{num_atoms:>3}  0  0  0  0  0  0  0  0  0999 V2000\n"
-            for line in f["coords"][2:]:
-                p = line.split()
-                if len(p) >= 4:
-                    sdf += f"{float(p[1]):>10.4f}{float(p[2]):>10.4f}{float(p[3]):>10.4f} {p[0]:<3} 0  0  0  0  0\n"
-            sdf += "M  END\n> <ENERGY_KCAL>\n{:.4f}\n\n$$$$\n".format(rel_e)
-        return sdf
-
-    st.download_button(f"Download {comp_name if comp_name else '---'}_{low_thresh}kcal.sdf", 
-                       data=get_sdf(low_thresh), file_name=f"{comp_name}_{low_thresh}kcal.sdf", disabled=not is_ready)
-    st.download_button(f"Download {comp_name if comp_name else '---'}_{high_thresh}kcal.sdf", 
-                       data=get_sdf(high_thresh), file_name=f"{comp_name}_{high_thresh}kcal.sdf", disabled=not is_ready)
+    st.download_button("Download Result (SDF)", data="", disabled=not is_ready)
 
 with col2:
     st.subheader("🔍 3D Viewer")
-    if is_ready and frames:
-        rank = st.slider("Select Structure", 1, len(frames), 1) if len(frames) > 1 else 1
-        f_view = frames[rank-1]
-        xyz_data = "".join(f_view["coords"])
+    if trj_exists and frames:
+        idx = st.slider("Conformer", 1, len(frames), 1) if len(frames) > 1 else 1
+        xyz_data = "".join(frames[idx-1])
         view = py3Dmol.view(width=450, height=450)
         view.addModel(xyz_data, 'xyz')
         view.setStyle({'stick': {'radius': 0.15}, 'sphere': {'scale': 0.25}})
         view.zoomTo()
         components.html(view._make_html(), height=460)
-        st.write(f"Relative Energy: **{(f_view['energy'] - min_e) * 627.509:.4f} kcal/mol**")
     else:
-        st.info("Upload structure and run analysis to view results.")
+        st.info("Ready for input.")
