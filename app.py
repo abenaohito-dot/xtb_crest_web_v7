@@ -8,15 +8,16 @@ import py3Dmol
 import streamlit.components.v1 as components
 
 # --- ページ設定 ---
-st.set_page_config(page_title="XTB-CREST Web Console v7.7", layout="wide")
+st.set_page_config(page_title="XTB-CREST Web Console v7.8", layout="wide")
 
-st.title("🧪 XTB-CREST Web Console v7.7")
-st.write("Natural Products Conformer Ensemble Analyzer")
+st.title("🧪 XTB-CREST Web Console v7.8")
+st.write("Natural Products Conformer Ensemble Analyzer - Robust Edition")
 
-# --- 状態リセット用関数 ---
+# --- 状態リセット関数 ---
 def reset_all():
-    if os.path.exists("xtb.trj"):
-        os.remove("xtb.trj")
+    files_to_remove = ["xtb.trj", "input.xyz", "crest_conformers.xyz", "crestopt.log", ".version"]
+    for f in files_to_remove:
+        if os.path.exists(f): os.remove(f)
     if "current_file" in st.session_state:
         del st.session_state.current_file
     st.rerun()
@@ -46,47 +47,65 @@ with col1:
     st.subheader("📥 Export Results")
     uploaded_file = st.file_uploader("Upload XYZ File", type=["xyz"])
     
-    # 新しいファイルが来たら古い結果を削除
+    # 新しいファイルアップロード時の自動リセット
     if uploaded_file:
         if "current_file" not in st.session_state or st.session_state.current_file != uploaded_file.name:
-            if os.path.exists("xtb.trj"):
-                os.remove("xtb.trj")
+            if os.path.exists("xtb.trj"): os.remove("xtb.trj")
             st.session_state.current_file = uploaded_file.name
 
     trj_file = "xtb.trj"
     trj_exists = os.path.exists(trj_file)
     is_ready = True if (trj_exists and comp_name) else False
 
-    # --- 解析実行エリア（常に表示） ---
+    # --- 解析実行エリア ---
     if uploaded_file:
         st.write("---")
         st.markdown("### 🚀 Calculation Control")
+        
+        # v7.8: Quick Modeのチェックボックス
+        quick_mode = st.checkbox("Quick Mode (--quick)", value=False, help="初期構造のひずみが大きく、最適化に失敗する場合に有効です。")
+        
         b_col1, b_col2 = st.columns(2)
         
         with b_col1:
-            # trjがあっても「再計算」できるように常に表示
             btn_label = "🔄 Re-run Real Analysis" if trj_exists else "🚀 Run Real CREST/xTB"
             if st.button(btn_label, type="primary"):
-                with st.spinner("Calculating..."):
-                    # 古いファイルを一旦消す
+                with st.spinner("Calculating... Check terminal for progress."):
+                    # 既存ファイルのクリーンアップ
                     if os.path.exists("xtb.trj"): os.remove("xtb.trj")
+                    if os.path.exists("crestopt.log"): os.remove("crestopt.log")
                     
                     with open("input.xyz", "wb") as f:
                         f.write(uploaded_file.getbuffer())
                     
                     if calc_mode == "CREST (Conformer Search)":
                         cmd = ["crest", "input.xyz", "--gfn2", "-T", str(cores)]
+                        if quick_mode: cmd.append("--quick") # v7.8 追加
                         if solvent != "none": cmd.extend(["--alpb", solvent])
-                        subprocess.run(cmd)
+                        result = subprocess.run(cmd, capture_output=True, text=True)
+                        
                         if os.path.exists("crest_conformers.xyz"):
                             os.replace("crest_conformers.xyz", "xtb.trj")
+                            st.success("CREST Finished!")
+                            st.rerun()
                     else:
                         cmd = ["xtb", "input.xyz", "--opt", "--gfn2"]
                         if solvent != "none": cmd.extend(["--alpb", solvent])
-                        subprocess.run(cmd)
+                        result = subprocess.run(cmd, capture_output=True, text=True)
                         if os.path.exists("xtbopt.xyz"):
                             os.replace("xtbopt.xyz", "xtb.trj")
-                    st.rerun()
+                            st.success("xTB Optimization Finished!")
+                            st.rerun()
+                    
+                    # 失敗時のログ表示
+                    if not os.path.exists("xtb.trj"):
+                        st.error("❌ Calculation failed.")
+                        if os.path.exists("crestopt.log"):
+                            st.markdown("**Last lines of crestopt.log:**")
+                            with open("crestopt.log", "r") as f:
+                                st.code("".join(f.readlines()[-20:]))
+                        else:
+                            st.code(result.stderr)
 
         with b_col2:
             if st.button("🛠️ Launch Test (Dummy)"):
@@ -95,10 +114,9 @@ with col1:
                 st.rerun()
         st.write("---")
 
-    # データ読み込み・SDF生成ロジック（以下、前回と同じ）
+    # データ読み込み・SDF生成
     frames = []
-    num_atoms = 0
-    min_e = 0.0
+    num_atoms, min_e = 0, 0.0
     if trj_exists:
         with open(trj_file, 'r') as f:
             lines = f.readlines()
@@ -113,7 +131,7 @@ with col1:
             frames.sort(key=lambda x: x["energy"])
             if frames: min_e = frames[0]["energy"]
 
-    def make_sdf(threshold):
+    def get_sdf(threshold):
         if not is_ready: return ""
         sdf = ""
         for i, f in enumerate(frames, start=1):
@@ -128,21 +146,15 @@ with col1:
             sdf += "M  END\n> <ENERGY_KCAL>\n{:.4f}\n\n$$$$\n".format(rel_e)
         return sdf
 
-    s1 = make_sdf(low_thresh)
-    st.download_button(f"Download {comp_name if comp_name else '---'}_{low_thresh}kcal.sdf", data=s1, file_name=f"{comp_name}_{low_thresh}kcal.sdf", disabled=not is_ready)
-    
-    s2 = make_sdf(high_thresh)
-    st.download_button(f"Download {comp_name if comp_name else '---'}_{high_thresh}kcal.sdf", data=s2, file_name=f"{comp_name}_{high_thresh}kcal.sdf", disabled=not is_ready)
+    st.download_button(f"Download {comp_name if comp_name else '---'}_{low_thresh}kcal.sdf", 
+                       data=get_sdf(low_thresh), file_name=f"{comp_name}_{low_thresh}kcal.sdf", disabled=not is_ready)
+    st.download_button(f"Download {comp_name if comp_name else '---'}_{high_thresh}kcal.sdf", 
+                       data=get_sdf(high_thresh), file_name=f"{comp_name}_{high_thresh}kcal.sdf", disabled=not is_ready)
 
 with col2:
     st.subheader("🔍 3D Viewer")
     if is_ready and frames:
-        if len(frames) > 1:
-            rank = st.slider("Select Conformer", 1, len(frames), 1)
-        else:
-            st.info("Single Result Displayed")
-            rank = 1
-        
+        rank = st.slider("Select Conformer", 1, len(frames), 1) if len(frames) > 1 else 1
         f_view = frames[rank-1]
         xyz_data = "".join(f_view["coords"])
         view = py3Dmol.view(width=450, height=450)
